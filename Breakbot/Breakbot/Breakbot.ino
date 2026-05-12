@@ -1,62 +1,72 @@
-// Motor A
-int motor1Pin1 = 27; 
-int motor1Pin2 = 26; 
-int enable1Pin = 14; 
+/*********
+  Adapted for ESP32 + L298N (Motor B: IN3=26, IN4=27, ENB=14)
+  Speed control via PWM on enable pin.
+*********/
 
-// Setting PWM properties
+// Motor B pins (L298N)
+int in3Pin = 26;   // IN3
+int in4Pin = 27;   // IN4
+int enableBPin = 14;  // ENB (PWM capable)
+
+// PWM settings
 const int freq = 30000;
 const int pwmChannel = 0;
 const int resolution = 8;
-int dutyCycle = 200;
+int dutyCycle = 200;   // starting duty cycle (0-255)
 
 void setup() {
-  // sets the pins as outputs:
-  pinMode(motor1Pin1, OUTPUT);
-  pinMode(motor1Pin2, OUTPUT);
-  pinMode(enable1Pin, OUTPUT);
-  // configure LEDC PWM
-  ledcAttachChannel(enable1Pin, freq, resolution, pwmChannel);
+  // Set direction pins as outputs
+  pinMode(in3Pin, OUTPUT);
+  pinMode(in4Pin, OUTPUT);
+  pinMode(enableBPin, OUTPUT);
+
+  // Attach PWM channel to enable pin
+  ledcAttachChannel(enableBPin, freq, resolution, pwmChannel);
 
   Serial.begin(115200);
-
-  // testing
-  Serial.print("Testing DC Motor...");
+  Serial.println("Testing DC Motor (Motor B)");
 }
 
 void loop() {
-  // Move the DC motor forward at maximum speed
+  // --- Forward at full speed ---
   Serial.println("Moving Forward");
-  digitalWrite(motor1Pin1, LOW);
-  digitalWrite(motor1Pin2, HIGH); 
+  digitalWrite(in3Pin, HIGH);
+  digitalWrite(in4Pin, LOW);
+  ledcWrite(enableBPin, 255);   // full speed
   delay(2000);
 
-  // Stop the DC motor
+  // --- Stop ---
   Serial.println("Motor stopped");
-  digitalWrite(motor1Pin1, LOW);
-  digitalWrite(motor1Pin2, LOW);
+  digitalWrite(in3Pin, LOW);
+  digitalWrite(in4Pin, LOW);
   delay(1000);
 
-  // Move DC motor backwards at maximum speed
-  Serial.println("Moving Backwards");
-  digitalWrite(motor1Pin1, HIGH);
-  digitalWrite(motor1Pin2, LOW); 
+  // --- Backward at full speed ---
+  Serial.println("Moving Backward");
+  digitalWrite(in3Pin, LOW);
+  digitalWrite(in4Pin, HIGH);
+  ledcWrite(enableBPin, 255);
   delay(2000);
 
-  // Stop the DC motor
+  // --- Stop ---
   Serial.println("Motor stopped");
-  digitalWrite(motor1Pin1, LOW);
-  digitalWrite(motor1Pin2, LOW);
+  digitalWrite(in3Pin, LOW);
+  digitalWrite(in4Pin, LOW);
   delay(1000);
 
-  // Move DC motor forward with increasing speed
-  digitalWrite(motor1Pin1, HIGH);
-  digitalWrite(motor1Pin2, LOW);
-  while (dutyCycle <= 255){
-    ledcWrite(enable1Pin, dutyCycle);   
-    Serial.print("Forward with duty cycle: ");
+  // --- Forward with increasing speed (ramp up) ---
+  Serial.println("Ramping speed forward");
+  digitalWrite(in3Pin, HIGH);
+  digitalWrite(in4Pin, LOW);
+  
+  dutyCycle = 0;
+  while (dutyCycle <= 255) {
+    ledcWrite(enableBPin, dutyCycle);
+    Serial.print("Forward duty cycle: ");
     Serial.println(dutyCycle);
     dutyCycle = dutyCycle + 5;
     delay(500);
   }
-  dutyCycle = 200;
+
+  dutyCycle = 200;   // reset for next loop iteration
 }
