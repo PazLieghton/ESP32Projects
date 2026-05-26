@@ -1,72 +1,149 @@
-/*********
-  Adapted for ESP32 + L298N (Motor B: IN3=26, IN4=27, ENB=14)
-  Speed control via PWM on enable pin.
-*********/
+#include <IRremote.h>
 
-// Motor B pins (L298N)
-int in3Pin = 26;   // IN3
-int in4Pin = 27;   // IN4
-int enableBPin = 14;  // ENB (PWM capable)
+// ----- Motor Pins -----
+int enableA = 32;
+int motorA1 = 33;
+int motorA2 = 25;
 
-// PWM settings
-const int freq = 30000;
-const int pwmChannel = 0;
-const int resolution = 8;
-int dutyCycle = 200;   // starting duty cycle (0-255)
+int enableB = 26;
+int motorB3 = 27;
+int motorB4 = 14;
 
+// ----- IR Receiver Pin -----
+const int IR_RECEIVE_PIN = 36;
+
+// ----- Default Speed (0-255) -----
+int robotSpeed = 200;
+
+// ------------------------------------------------------------------
 void setup() {
-  // Set direction pins as outputs
-  pinMode(in3Pin, OUTPUT);
-  pinMode(in4Pin, OUTPUT);
-  pinMode(enableBPin, OUTPUT);
+  Serial.begin(9600);
+  delay(500);
 
-  // Attach PWM channel to enable pin
-  ledcAttachChannel(enableBPin, freq, resolution, pwmChannel);
+  // ----- Motor pins -----
+  pinMode(enableA, OUTPUT);
+  pinMode(motorA1, OUTPUT);
+  pinMode(motorA2, OUTPUT);
+  pinMode(enableB, OUTPUT);
+  pinMode(motorB3, OUTPUT);
+  pinMode(motorB4, OUTPUT);
 
-  Serial.begin(115200);
-  Serial.println("Testing DC Motor (Motor B)");
+  // ----- IR Receiver -----
+  IrReceiver.begin(IR_RECEIVE_PIN, ENABLE_LED_FEEDBACK);
+  Serial.println("IR Receiver ready. Press buttons on your Car MP3 remote.");
 }
 
+// ----- Movement Functions -----
+void moveForward(int speed) {
+  digitalWrite(motorA1, HIGH);
+  digitalWrite(motorA2, LOW);
+  analogWrite(enableA, speed);
+
+  digitalWrite(motorB3, HIGH);
+  digitalWrite(motorB4, LOW);
+  analogWrite(enableB, speed);
+}
+
+void moveBackward(int speed) {
+  digitalWrite(motorA1, LOW);
+  digitalWrite(motorA2, HIGH);
+  analogWrite(enableA, speed);
+
+  digitalWrite(motorB3, LOW);
+  digitalWrite(motorB4, HIGH);
+  analogWrite(enableB, speed);
+}
+
+void turnLeft(int speed) {
+  digitalWrite(motorA1, LOW);
+  digitalWrite(motorA2, HIGH);
+  analogWrite(enableA, speed);
+
+  digitalWrite(motorB3, HIGH);
+  digitalWrite(motorB4, LOW);
+  analogWrite(enableB, speed);
+}
+
+void turnRight(int speed) {
+  digitalWrite(motorA1, HIGH);
+  digitalWrite(motorA2, LOW);
+  analogWrite(enableA, speed);
+
+  digitalWrite(motorB3, LOW);
+  digitalWrite(motorB4, HIGH);
+  analogWrite(enableB, speed);
+}
+
+void stopMotors() {
+  analogWrite(enableA, 0);
+  analogWrite(enableB, 0);
+  digitalWrite(motorA1, LOW);
+  digitalWrite(motorA2, LOW);
+  digitalWrite(motorB3, LOW);
+  digitalWrite(motorB4, LOW);
+}
+
+// ------------------------------------------------------------------
 void loop() {
-  // --- Forward at full speed ---
-  Serial.println("Moving Forward");
-  digitalWrite(in3Pin, HIGH);
-  digitalWrite(in4Pin, LOW);
-  ledcWrite(enableBPin, 255);   // full speed
-  delay(2000);
+  if (IrReceiver.decode()) {
+    if (!(IrReceiver.decodedIRData.flags & IRDATA_FLAGS_IS_REPEAT)) {
+      Serial.print("Received IR Command: 0x");
+      Serial.println(IrReceiver.decodedIRData.command, HEX);
 
-  // --- Stop ---
-  Serial.println("Motor stopped");
-  digitalWrite(in3Pin, LOW);
-  digitalWrite(in4Pin, LOW);
-  delay(1000);
+      switch (IrReceiver.decodedIRData.command) {
+        case 0x8:   // Forward
+          Serial.println("Moving Forward");
+          moveForward(robotSpeed);
+          break;
 
-  // --- Backward at full speed ---
-  Serial.println("Moving Backward");
-  digitalWrite(in3Pin, LOW);
-  digitalWrite(in4Pin, HIGH);
-  ledcWrite(enableBPin, 255);
-  delay(2000);
+        case 0x5A:  // Backward
+          Serial.println("Moving Backward");
+          moveBackward(robotSpeed);
+          break;
 
-  // --- Stop ---
-  Serial.println("Motor stopped");
-  digitalWrite(in3Pin, LOW);
-  digitalWrite(in4Pin, LOW);
-  delay(1000);
+        case 0x18:  // Left
+          Serial.println("Turning Left");
+          turnLeft(robotSpeed);
+          break;
 
-  // --- Forward with increasing speed (ramp up) ---
-  Serial.println("Ramping speed forward");
-  digitalWrite(in3Pin, HIGH);
-  digitalWrite(in4Pin, LOW);
-  
-  dutyCycle = 0;
-  while (dutyCycle <= 255) {
-    ledcWrite(enableBPin, dutyCycle);
-    Serial.print("Forward duty cycle: ");
-    Serial.println(dutyCycle);
-    dutyCycle = dutyCycle + 5;
-    delay(500);
+        case 0x52:  // Right
+          Serial.println("Turning Right");
+          turnRight(robotSpeed);
+          break;
+
+        case 0x1C:  // Stop
+          Serial.println("Stopping");
+          stopMotors();
+          break;
+
+        case 0x15:  // Increase Speed
+          robotSpeed += 25;
+          if (robotSpeed > 255) robotSpeed = 255;
+          Serial.print("Speed Increased: ");
+          Serial.println(robotSpeed);
+          // If motors are running, update their speed immediately
+          if (digitalRead(motorA1) || digitalRead(motorA2) || digitalRead(motorB3) || digitalRead(motorB4)) {
+            analogWrite(enableA, robotSpeed);
+            analogWrite(enableB, robotSpeed);
+          }
+          break;
+
+        case 0x7:   // Decrease Speed
+          robotSpeed -= 25;
+          if (robotSpeed < 0) robotSpeed = 0;
+          Serial.print("Speed Decreased: ");
+          Serial.println(robotSpeed);
+          if (digitalRead(motorA1) || digitalRead(motorA2) || digitalRead(motorB3) || digitalRead(motorB4)) {
+            analogWrite(enableA, robotSpeed);
+            analogWrite(enableB, robotSpeed);
+          }
+          break;
+
+        default:
+          Serial.println("Unmapped button pressed.");
+          break;
+      }
+    }
+    IrReceiver.resume();
   }
-
-  dutyCycle = 200;   // reset for next loop iteration
 }
