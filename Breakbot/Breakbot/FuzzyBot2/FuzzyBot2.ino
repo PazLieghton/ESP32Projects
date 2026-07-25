@@ -1,9 +1,13 @@
 // ============================================================
 //  ESP32 WROOM — IR Remote + Smart Ultrasonic Exploration
-//  Libraries needed: IRremote (by shirriff, z3t0, ArminJo)
+//  + KY-031 Knock Sensor (Bump Stop) + Servo Scanning
+//  Libraries needed: 
+//  1. IRremote (by shirriff, z3t0, ArminJo)
+//  2. ESP32Servo (by Kevin Harrington)
 // ============================================================
 
 #include <IRremote.h>
+#include <ESP32Servo.h> 
 
 // Struct must be declared before any function that uses it as a return type
 struct ScanResult {
@@ -29,18 +33,42 @@ const int IR_RECEIVE_PIN = 36;
 
 // ============================================================
 //  SECTION 3 — ULTRASONIC SENSOR PINS (HC-SR04)
-//  TRIG → GPIO 22  |  ECHO → GPIO 4 (NOT GPIO 1)
+//  TRIG → GPIO 22  |  ECHO → GPIO 4
 // ============================================================
 const int TRIG_PIN = 22;
 const int ECHO_PIN = 4;
 
-// How close (cm) before reacting — tightened from 20 to 12
+// ============================================================
+//  SECTION 3b — KY-031 KNOCK / BUMP SENSOR (GPIO 2)
+// ============================================================
+#define KNOCK_PIN   2        // KY-031 signal pin
+bool bumped = false;         // true = impact just detected (only used in auto mode)
+unsigned long bumpClearTime = 0;   // when we can clear the flag
+
+int bumpCounter=0;
+const int BUMP_THRESHOLD=5;
+
+// How close (cm) before reacting — ultrasonic threshold
 const int OBSTACLE_CM = 12;
+
+bool ignoreBumpSensor=false;
+// ============================================================
+//  SECTION 3c — SERVO MOTOR SETTINGS (GPIO 15)
+// ============================================================
+const int SERVO_PIN = 15;
+Servo ultraServo;
+
+// Easily adjustable parameters for angles and timing
+const int ANGLE_CENTER = 90;   // Straight ahead
+const int ANGLE_LEFT   = 160;  // Looking Left
+const int ANGLE_RIGHT  = 20;   // Looking Right
+const int SERVO_DELAY  = 1200;  // Time (ms) allowed for the physical servo to turn
+
 
 // ============================================================
 //  SECTION 4 — SPEED & MODE STATE
 // ============================================================
-int  robotSpeed = 200;
+int  robotSpeed = 175;
 bool autoMode   = false;
 
 // IR button hex codes (Car MP3 remote)
@@ -70,6 +98,12 @@ void setup() {
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
   digitalWrite(TRIG_PIN, LOW);
+
+  pinMode(KNOCK_PIN, INPUT);   // KY-031 gives HIGH on knock
+
+  // Initialize Servo
+  ultraServo.attach(SERVO_PIN);
+  setSensorAngle(ANGLE_CENTER); // Look straight ahead initially
 
   IrReceiver.begin(IR_RECEIVE_PIN, ENABLE_LED_FEEDBACK);
 
@@ -113,17 +147,15 @@ bool motorsRunning() {
 }
 
 // ============================================================
+//  SECTION 6b — ISOLATED SERVO CONTROL FUNCTION
+// ============================================================
+void setSensorAngle(int angle) {
+  ultraServo.write(angle);
+  delay(SERVO_DELAY); // Give the servo gear time to physically reach the angle
+}
+
+// ============================================================
 //  SECTION 7 — ULTRASONIC DISTANCE FUNCTION
-//
-//  Key fixes:
-//  - Timeout now returns 3 cm, NOT 999.
-//    HC-SR04 blind zone is ~2-3 cm. If pulseIn times out it
-//    almost always means something is RIGHT in front, not clear.
-//    Returning 999 before was telling the robot "all clear"
-//    when it was actually touching an obstacle.
-//  - Takes 3 readings, returns the LOWEST (most conservative).
-//    The median was hiding real close-range detections.
-//  - delay(15) between pings lets the echo fully die out.
 // ============================================================
 long getDistanceCM() {
   long readings[3];
@@ -153,124 +185,100 @@ long getDistanceCM() {
 }
 
 // ============================================================
-//  SECTION 8 — SCAN LEFT / CENTER / RIGHT
-//
-//  Briefly turns the robot to aim the sensor in each direction,
-//  reads the distance, then returns to center. This means the
-//  robot "looks" before deciding which way to go.
-//
-//  SCAN_TURN_MS — how long to turn to face each side (ms).
-//  Keep this short: just enough to swing ~30–45 degrees.
-//  Adjust if your robot turns too little or too much.
+//  SECTION 8 — SCAN LEFT / CENTER / RIGHT (UPDATED TO USE SERVO)
 // ============================================================
-const int SCAN_TURN_MS  = 180;  // ms to swing left or right for scan
-const int SCAN_SPEED    = 160;  // slower speed for scanning turns
-
 ScanResult scanSurroundings() {
   ScanResult result;
 
-  // --- Read CENTER first (already facing forward) ---
+  // --- Read CENTER first ---
+  setSensorAngle(ANGLE_CENTER);
   result.centerCM = getDistanceCM();
   Serial.print("Center: "); Serial.print(result.centerCM); Serial.println(" cm");
 
-  // --- Swing LEFT, read, swing back to center ---
-  turnLeft(SCAN_SPEED);
-  delay(SCAN_TURN_MS);
-  stopMotors();
-  delay(80); // let robot settle before reading
+  // --- Turn Servo LEFT and read ---
+  setSensorAngle(ANGLE_LEFT);
   result.leftCM = getDistanceCM();
   Serial.print("Left:   "); Serial.print(result.leftCM); Serial.println(" cm");
 
-  turnRight(SCAN_SPEED); // return to center
-  delay(SCAN_TURN_MS);
-  stopMotors();
-  delay(80);
-
-  // --- Swing RIGHT, read, swing back to center ---
-  turnRight(SCAN_SPEED);
-  delay(SCAN_TURN_MS);
-  stopMotors();
-  delay(80);
+  // --- Turn Servo RIGHT and read ---
+  setSensorAngle(ANGLE_RIGHT);
   result.rightCM = getDistanceCM();
   Serial.print("Right:  "); Serial.print(result.rightCM); Serial.println(" cm");
 
-  turnLeft(SCAN_SPEED); // return to center
-  delay(SCAN_TURN_MS);
-  stopMotors();
-  delay(80);
+  // --- Reset Servo back to CENTER ---
+  setSensorAngle(ANGLE_CENTER);
 
   return result;
 }
 
 // ============================================================
 //  SECTION 9 — AUTONOMOUS EXPLORATION LOGIC
-//
-//  Strategy:
-//   1. Drive forward while path is clear (tight threshold).
-//   2. On obstacle: stop → back up just a little → SCAN all
-//      three directions → turn toward the most open side.
-//   3. If all directions are blocked, do a 180.
 // ============================================================
+const int TURN_MS = 500;  // how long to turn toward chosen direction (ms)
 
-// How far to turn toward the chosen direction after scanning (ms).
-// Adjust TURN_MS if the robot doesn't turn enough / too much.
-const int TURN_MS = 350;
-
-void runAutoExploration() {
-  long dist = getDistanceCM();
-
-  if (dist > OBSTACLE_CM) {
-    moveForward(robotSpeed);
-    return; // nothing to do, keep going
-  }
-
-  // ── Obstacle detected ─────────────────────────────────────
-  Serial.print("Obstacle at "); Serial.print(dist); Serial.println(" cm — scanning...");
-  stopMotors();
-  delay(100);
-
-  // Back up just enough to have room to turn (~15cm worth)
+void handleObstacleScanAndTurn() {
+  // Back up slightly to have room to turn
   moveBackward(robotSpeed);
   delay(250);
   stopMotors();
   delay(100);
 
-  // Scan all three directions
   ScanResult scan = scanSurroundings();
 
-  // ── Decide which way to go ────────────────────────────────
   bool leftClear   = scan.leftCM   > OBSTACLE_CM;
   bool centerClear = scan.centerCM > OBSTACLE_CM;
   bool rightClear  = scan.rightCM  > OBSTACLE_CM;
 
   if (centerClear && scan.centerCM >= scan.leftCM && scan.centerCM >= scan.rightCM) {
-    // Center is clear AND the best option — no turn needed
     Serial.println("Best path: CENTER — going straight");
-
   } else if (leftClear && (!rightClear || scan.leftCM >= scan.rightCM)) {
-    // Left is clearer
     Serial.println("Best path: LEFT");
+    ignoreBumpSensor=true;
     turnLeft(robotSpeed);
     delay(TURN_MS);
     stopMotors();
-
+    ignoreBumpSensor = false;
   } else if (rightClear) {
-    // Right is clearer
     Serial.println("Best path: RIGHT");
+    ignoreBumpSensor=true;
     turnRight(robotSpeed);
     delay(TURN_MS);
     stopMotors();
-
+    ignoreBumpSensor = false;
   } else {
-    // All directions blocked — do a 180
     Serial.println("All blocked — doing 180");
+    ignoreBumpSensor=true;
     turnRight(robotSpeed);
     delay(TURN_MS * 2);
     stopMotors();
+    ignoreBumpSensor = false;
+  }
+  delay(100);
+}
+
+void runAutoExploration() {
+  // If a physical bump was detected, pause for 1 second, then handle as obstacle
+  if (bumped) {
+    Serial.println(">>> Auto mode: BUMP – pausing 1 sec <<<");
+    stopMotors();
+    delay(200);                 // 1 second pause to see it detected something
+    handleObstacleScanAndTurn();
+    bumped = false;              // cleared because we've reacted
+    return;
   }
 
+  long dist = getDistanceCM();
+
+  if (dist > OBSTACLE_CM) {
+    moveForward(robotSpeed);
+    return;
+  }
+
+  // Obstacle from ultrasonic
+  Serial.print("Obstacle at "); Serial.print(dist); Serial.println(" cm — scanning...");
+  stopMotors();
   delay(100);
-  // Resume forward on next loop iteration
+  handleObstacleScanAndTurn();
 }
 
 // ============================================================
@@ -296,37 +304,58 @@ void handleIRRemote() {
         break;
 
       case BTN_FORWARD:
-        if (!autoMode) { Serial.println("Forward"); moveForward(robotSpeed); }
+        if (!autoMode) {
+          Serial.println("Forward");
+          moveForward(robotSpeed);
+        }
         break;
 
       case BTN_BACKWARD:
-        if (!autoMode) { Serial.println("Backward"); moveBackward(robotSpeed); }
+        if (!autoMode) {
+          Serial.println("Backward");
+          moveBackward(robotSpeed);
+        }
         break;
 
       case BTN_LEFT:
-        if (!autoMode) { Serial.println("Left"); turnLeft(robotSpeed); }
+        if (!autoMode) {
+          Serial.println("Left");
+          turnLeft(robotSpeed);
+        }
         break;
 
       case BTN_RIGHT:
-        if (!autoMode) { Serial.println("Right"); turnRight(robotSpeed); }
+        if (!autoMode) {
+          Serial.println("Right");
+          turnRight(robotSpeed);
+        }
         break;
 
       case BTN_STOP:
-        if (!autoMode) { Serial.println("Stop"); stopMotors(); }
+        if (!autoMode) {
+          Serial.println("Stop");
+          stopMotors();
+        }
         break;
 
       case BTN_SPEED_UP:
         robotSpeed += 25;
         if (robotSpeed > 255) robotSpeed = 255;
         Serial.print("Speed+: "); Serial.println(robotSpeed);
-        if (motorsRunning()) { analogWrite(enableA, robotSpeed); analogWrite(enableB, robotSpeed); }
+        if (motorsRunning()) {
+          analogWrite(enableA, robotSpeed);
+          analogWrite(enableB, robotSpeed);
+        }
         break;
 
       case BTN_SPEED_DOWN:
         robotSpeed -= 25;
         if (robotSpeed < 0) robotSpeed = 0;
         Serial.print("Speed-: "); Serial.println(robotSpeed);
-        if (motorsRunning()) { analogWrite(enableA, robotSpeed); analogWrite(enableB, robotSpeed); }
+        if (motorsRunning()) {
+          analogWrite(enableA, robotSpeed);
+          analogWrite(enableB, robotSpeed);
+        }
         break;
 
       default:
@@ -342,9 +371,34 @@ void handleIRRemote() {
 //  SECTION 11 — MAIN LOOP
 // ============================================================
 void loop() {
+
+  // Normal remote handling
   handleIRRemote();
 
+  // Autonomous mode
   if (autoMode) {
+
+    // Require several consecutive bump detections
+    if (digitalRead(KNOCK_PIN) == HIGH) {
+      Serial.println("KNOCK HIGH");
+      bumpCounter++;
+
+      if (bumpCounter >= BUMP_THRESHOLD) {
+
+        if (!bumped) {
+          Serial.println(">>> BUMP CONFIRMED <<<");
+          bumped = true;
+        }
+
+        bumpCounter = 0;
+      }
+
+    } else {
+
+      bumpCounter = 0;
+
+    }
+
     runAutoExploration();
   }
 }
